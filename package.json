@@ -13,9 +13,10 @@
     "productName": "QuickQuill",
     "mac": {
       "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
       "target": [{ "target": "dir", "arch": ["arm64", "x64"] }]
     },
-    "files": ["main.js", "preload.js", "renderer/**/*", "node_modules/**/*"]
+    "files": ["main.js", "preload.js", "renderer/**/*", "assets/**/*", "node_modules/**/*"]
   },
   "devDependencies": {
     "electron": "^29.0.0",
