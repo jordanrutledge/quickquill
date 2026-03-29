@@ -1,46 +1,45 @@
 name: Build QuickQuill
- 
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
- 
+
 jobs:
   build-mac:
     runs-on: macos-latest
- 
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
- 
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
- 
+
       - name: Install dependencies
-        run: npm install
- 
+        run: npm install --no-package-lock
+
       - name: Build .app (universal)
         run: npx electron-builder --mac dir --x64 --arm64
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
- 
+
       - name: Zip the .app
         run: |
           cd dist
           zip -r ../QuickQuill-mac-arm64.zip mac-arm64/QuickQuill.app 2>/dev/null || true
           zip -r ../QuickQuill-mac-x64.zip mac/QuickQuill.app 2>/dev/null || true
           ls -lh ../*.zip
- 
+
       - name: Upload arm64 build
         uses: actions/upload-artifact@v4
         with:
           name: QuickQuill-mac-arm64
           path: QuickQuill-mac-arm64.zip
           if-no-files-found: warn
- 
+
       - name: Upload x64 build
         uses: actions/upload-artifact@v4
         with:
