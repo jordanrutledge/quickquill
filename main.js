@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -15,18 +15,21 @@ function createWindow() {
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
     backgroundColor: '#1e1e1e',
+    show: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: false,
     },
-    show: false,
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
+  // Open DevTools on load errors so we can debug
+  mainWindow.webContents.on('did-fail-load', (e, code, desc) => {
+    console.error('Failed to load:', code, desc);
+    mainWindow.webContents.openDevTools();
   });
 
   mainWindow.on('close', async (e) => {
@@ -39,14 +42,8 @@ function createWindow() {
         message: 'You have unsaved changes.',
         detail: 'Do you want to save before closing?',
       });
-      if (response === 0) {
-        await handleSave();
-        mainWindow.close();
-      } else if (response === 1) {
-        isDirty = false;
-        mainWindow.close();
-      }
-      // response === 2 → cancel, do nothing
+      if (response === 0) { await handleSave(); mainWindow.close(); }
+      else if (response === 1) { isDirty = false; mainWindow.close(); }
     }
   });
 }
@@ -70,9 +67,7 @@ async function handleOpen() {
 }
 
 async function handleSave() {
-  if (!currentFilePath) {
-    return handleSaveAs();
-  }
+  if (!currentFilePath) return handleSaveAs();
   const content = await mainWindow.webContents.executeJavaScript('window.__getEditorContent()');
   fs.writeFileSync(currentFilePath, content, 'utf-8');
   isDirty = false;
@@ -81,7 +76,7 @@ async function handleSave() {
 
 async function handleSaveAs() {
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    filters: [{ name: 'Markdown', extensions: ['md'] }],
+    filters: [{ name: 'All Files', extensions: ['*'] }],
     defaultPath: 'untitled.md',
   });
   if (!canceled && filePath) {
@@ -102,15 +97,10 @@ function handleNew() {
 
 function updateTitle() {
   const name = currentFilePath ? path.basename(currentFilePath) : 'Untitled';
-  const dirty = isDirty ? ' •' : '';
-  mainWindow.setTitle(`${name}${dirty} — QuickQuill`);
+  mainWindow.setTitle(`${name}${isDirty ? ' •' : ''} — QuickQuill`);
 }
 
-ipcMain.on('content-changed', () => {
-  isDirty = true;
-  updateTitle();
-});
-
+ipcMain.on('content-changed', () => { isDirty = true; updateTitle(); });
 ipcMain.on('request-open', handleOpen);
 ipcMain.on('request-save', handleSave);
 ipcMain.on('request-save-as', handleSaveAs);
@@ -123,9 +113,7 @@ function buildMenu() {
       submenu: [
         { role: 'about' },
         { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideOthers' },
-        { role: 'unhide' },
+        { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
         { type: 'separator' },
         { role: 'quit' },
       ],
@@ -133,7 +121,7 @@ function buildMenu() {
     {
       label: 'File',
       submenu: [
-        { label: 'New', accelerator: 'CmdOrCtrl+N', click: handleNew },
+        { label: 'New Tab', accelerator: 'CmdOrCtrl+N', click: handleNew },
         { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: handleOpen },
         { type: 'separator' },
         { label: 'Save', accelerator: 'CmdOrCtrl+S', click: handleSave },
@@ -143,13 +131,9 @@ function buildMenu() {
     {
       label: 'Edit',
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        { role: 'undo' }, { role: 'redo' },
         { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
-        { role: 'selectAll' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
       ],
     },
     {
@@ -157,9 +141,7 @@ function buildMenu() {
       submenu: [
         { role: 'togglefullscreen' },
         { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
+        { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
         { type: 'separator' },
         { role: 'toggleDevTools' },
       ],
@@ -167,21 +149,16 @@ function buildMenu() {
     {
       label: 'Window',
       submenu: [
-        { role: 'minimize' },
-        { role: 'zoom' },
-        { role: 'close' },
+        { role: 'minimize' }, { role: 'zoom' }, { role: 'close' },
       ],
     },
   ];
-
-  const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 app.whenReady().then(() => {
   createWindow();
   buildMenu();
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
