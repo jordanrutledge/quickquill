@@ -3,8 +3,10 @@ const path = require('path');
 const fs = require('fs');
 
 let mainWindow;
-let currentFilePath = null;
-let isDirty = false;
+
+// Per-tab file state — keyed by tab id from renderer
+const tabState = {};  // { [tabId]: { filePath, dirty } }
+let activeTabId = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -26,32 +28,75 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
-  // Open DevTools on load errors so we can debug
   mainWindow.webContents.on('did-fail-load', (e, code, desc) => {
     console.error('Failed to load:', code, desc);
-    mainWindow.webContents.openDevTools();
   });
 
   mainWindow.on('close', async (e) => {
-    if (isDirty) {
+    // Skip save dialog in test mode
+    if (process.argv.includes('--test-mode') || process.env.QQ_TEST) return;
+    // Check all dirty tabs
+    const dirtyTabs = Object.entries(tabState).filter(([, s]) => s.dirty);
+    if (dirtyTabs.length > 0) {
       e.preventDefault();
       const { response } = await dialog.showMessageBox(mainWindow, {
         type: 'question',
-        buttons: ['Save', "Don't Save", 'Cancel'],
+        buttons: ['Save All', "Don't Save", 'Cancel'],
         defaultId: 0,
-        message: 'You have unsaved changes.',
+        message: `You have ${dirtyTabs.length} unsaved tab${dirtyTabs.length > 1 ? 's' : ''}.`,
         detail: 'Do you want to save before closing?',
       });
-      if (response === 0) { await handleSave(); mainWindow.close(); }
-      else if (response === 1) { isDirty = false; mainWindow.close(); }
+      if (response === 0) {
+        for (const [tabId] of dirtyTabs) {
+          await handleSaveTab(parseInt(tabId));
+        }
+        mainWindow.close();
+      } else if (response === 1) {
+        Object.values(tabState).forEach(s => s.dirty = false);
+        mainWindow.close();
+      }
     }
   });
 }
 
+// IPC: renderer notifies active tab changed
+ipcMain.on('tab-activated', (_, { tabId, filePath, name }) => {
+  activeTabId = tabId;
+  if (!tabState[tabId]) tabState[tabId] = { filePath: filePath || null, dirty: false };
+  updateTitle(name, tabState[tabId].dirty);
+});
+
+// IPC: renderer notifies content changed for a tab
+ipcMain.on('content-changed', (_, { tabId, name }) => {
+  if (!tabState[tabId]) tabState[tabId] = { filePath: null, dirty: false };
+  tabState[tabId].dirty = true;
+  if (tabId === activeTabId) updateTitle(name, true);
+});
+
+// IPC: renderer notifies a tab was closed
+ipcMain.on('tab-closed', (_, { tabId }) => {
+  delete tabState[tabId];
+});
+
+// IPC: open file
+ipcMain.on('request-open', handleOpen);
+
+// IPC: save active tab
+ipcMain.on('request-save', async (_, opts) => {
+  const tabId = (opts && opts.tabId) || activeTabId;
+  await handleSaveTab(tabId);
+});
+
+// IPC: save as active tab
+ipcMain.on('request-save-as', async (_, opts) => {
+  const tabId = (opts && opts.tabId) || activeTabId;
+  await handleSaveAsTab(tabId);
+});
+
 async function handleOpen() {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     filters: [
-      { name: 'Markdown', extensions: ['md', 'markdown', 'txt'] },
+      { name: 'Text Files', extensions: ['md', 'markdown', 'txt', 'js', 'ts', 'py', 'json', 'css', 'html', 'yaml', 'yml', 'sh'] },
       { name: 'All Files', extensions: ['*'] },
     ],
     properties: ['openFile'],
@@ -59,52 +104,53 @@ async function handleOpen() {
   if (!canceled && filePaths.length > 0) {
     const filePath = filePaths[0];
     const content = fs.readFileSync(filePath, 'utf-8');
-    currentFilePath = filePath;
-    isDirty = false;
     mainWindow.webContents.send('file-opened', { content, filePath });
-    updateTitle();
   }
 }
 
-async function handleSave() {
-  if (!currentFilePath) return handleSaveAs();
-  const content = await mainWindow.webContents.executeJavaScript('window.__getEditorContent()');
-  fs.writeFileSync(currentFilePath, content, 'utf-8');
-  isDirty = false;
-  updateTitle();
+async function handleSaveTab(tabId) {
+  if (!tabId) return;
+  const state = tabState[tabId];
+  if (!state || !state.filePath) {
+    await handleSaveAsTab(tabId);
+    return;
+  }
+  const content = await mainWindow.webContents.executeJavaScript(
+    `window.__getTabContent(${tabId})`
+  );
+  fs.writeFileSync(state.filePath, content, 'utf-8');
+  state.dirty = false;
+  const name = path.basename(state.filePath);
+  mainWindow.webContents.send('file-saved', { tabId, filePath: state.filePath });
+  if (tabId === activeTabId) updateTitle(name, false);
 }
 
-async function handleSaveAs() {
+async function handleSaveAsTab(tabId) {
+  if (!tabId) return;
+  const state = tabState[tabId] || { filePath: null };
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
     filters: [{ name: 'All Files', extensions: ['*'] }],
-    defaultPath: 'untitled.md',
+    defaultPath: state.filePath || 'untitled.md',
   });
   if (!canceled && filePath) {
-    const content = await mainWindow.webContents.executeJavaScript('window.__getEditorContent()');
+    const content = await mainWindow.webContents.executeJavaScript(
+      `window.__getTabContent(${tabId})`
+    );
     fs.writeFileSync(filePath, content, 'utf-8');
-    currentFilePath = filePath;
-    isDirty = false;
-    updateTitle();
+    if (!tabState[tabId]) tabState[tabId] = {};
+    tabState[tabId].filePath = filePath;
+    tabState[tabId].dirty = false;
+    const name = path.basename(filePath);
+    mainWindow.webContents.send('file-saved', { tabId, filePath });
+    if (tabId === activeTabId) updateTitle(name, false);
   }
 }
 
-function handleNew() {
-  currentFilePath = null;
-  isDirty = false;
-  mainWindow.webContents.send('file-opened', { content: '', filePath: null });
-  updateTitle();
+function updateTitle(name, dirty) {
+  if (!mainWindow) return;
+  const displayName = name || 'Untitled';
+  mainWindow.setTitle(`${displayName}${dirty ? ' •' : ''} — QuickQuill`);
 }
-
-function updateTitle() {
-  const name = currentFilePath ? path.basename(currentFilePath) : 'Untitled';
-  mainWindow.setTitle(`${name}${isDirty ? ' •' : ''} — QuickQuill`);
-}
-
-ipcMain.on('content-changed', () => { isDirty = true; updateTitle(); });
-ipcMain.on('request-open', handleOpen);
-ipcMain.on('request-save', handleSave);
-ipcMain.on('request-save-as', handleSaveAs);
-ipcMain.on('request-new', handleNew);
 
 function buildMenu() {
   const template = [
@@ -121,11 +167,13 @@ function buildMenu() {
     {
       label: 'File',
       submenu: [
-        { label: 'New Tab', accelerator: 'CmdOrCtrl+N', click: handleNew },
+        { label: 'New Tab', accelerator: 'CmdOrCtrl+N', click: () => mainWindow.webContents.send('new-tab') },
         { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: handleOpen },
         { type: 'separator' },
-        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: handleSave },
-        { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: handleSaveAs },
+        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: () => handleSaveTab(activeTabId) },
+        { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => handleSaveAsTab(activeTabId) },
+        { type: 'separator' },
+        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => mainWindow.webContents.send('close-tab') },
       ],
     },
     {
